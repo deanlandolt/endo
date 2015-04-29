@@ -6,12 +6,10 @@
   "dependencies": {
     "JSONStream": "^0.10.0",
     "endoc": "https://github.com/deanlandolt/endoc/tarball/master",
-    "engine.io-stream": "^0.4.3",
-    "monotonic-timestamp": "0.0.9",
+    "multiplex": "^5.0.0",
     "paramify": "^0.1.2",
     "performance-now": "^0.2.0",
     "semver": "^4.3.3",
-    "split": "^0.3.2",
     "xtend": "^4.0.0"
   },
   "scripts": {

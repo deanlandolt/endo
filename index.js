@@ -1,9 +1,7 @@
-var engine = require('engine.io-stream');
 var http = require('http');
 var JSONStream = require('JSONStream');
-var split = require('split');
-var timestamp = require('monotonic-timestamp');
 var xtend = require('xtend');
+var multiplex = require('multiplex');
 
 var docs = require('endoc');
 var endpoints = require('./endpoints');
@@ -102,104 +100,28 @@ exports.serve = function serve(config) {
     }).catch(writeError);
   }
 
-  //
-  // handler for websocket requests
-  //
-  function handleEvent(stream) {
-
-    //
-    // helper for normalizing and serializing event data
-    //
-    function handleRequestEvent(request) {
-
-      function writeEvent(data) {
-        stream.write(JSON.stringify(xtend(event, data)) + '\n');
-      }
-
-      var event = { url: request.url };
-
-      //
-      // run event request payload through standard request processing
-      //
-      return Promise.resolve(handler(request)).then(function (data) {
+  function createStream(){
+    var plex = multiplex(function(stream){
+      var request = { url: stream.meta };
+      Promise.resolve(handler(request)).then(function(data){
         var body = data.body;
-
-        if (body && typeof body.pipe === 'function') {
-          //
-          // streaming responses get an associated subscription id
-          //
-          event.subscriptionId = timestamp();
-
-          //
-          // write event record head, providing any handler metadata
-          //
-          writeEvent({
-            status: body.status,
-            headers: body.headers
-          });
-
-          // TODO: differentiate between array-like and map-like object streams
-          return body.on('data', function (chunk) {
-            //
-            // write data chunks to socket
-            //
-            writeEvent({
-              key: chunk[0],
-              value: chunk[1]
-            });
-          })
-          .on('close', function () {
-            //
-            // write null error key to signal request end
-            //
-            writeEvent({ error: null });
-          })
+        if (body && typeof body.pipe == 'function') {
+          if (body.readable) body.pipe(stream);
+          if (body.writable) stream.pipe(body);
+          body.on('error', plex.emit.bind(plex, 'error'));
+        } else {
+          stream.end(data);
         }
-
-        //
-        // non-streaming handler responses result in a single event record
-        //
-        return writeEvent(data);
-
       })
-      .catch(function (error) {
-        errors.log('SOCKET STREAM ERROR', error)
-        writeEvent({ error: error });
-      });
-    }
-
-    stream.on('error', function (error) {
-      errors.log('SOCKET ERROR', error);
-    })
-    .pipe(split(JSON.parse))
-    .on('data', handleRequestEvent);
+      .catch(plex.emit.bind(plex, 'error'));
+    });
+    return plex;
   }
 
-  //
-  // spin up http server to handle requests
-  //
-  var server = http.createServer(handleRequest);
-
-  server.on('error', function (error) {
-    errors.log('SERVER ERROR', error);
-  });
-
-  return new Promise(function (resolve, reject) {
-    server.listen(config.port, config.host, function (error) {
-      if (error) {
-        return reject(error);
-      }
-
-      //
-      // attach websocket server if requested
-      //
-      if (config.sockets) {
-        engine(handleEvent).attach(server, config.sockets.path || '/ws');
-      }
-
-      resolve(server);
-    });
-  });
+  return {
+    handleRequest: handleRequest,
+    createStream: createStream
+  };
 }
 
 exports.handler = function (next) {
