@@ -1,212 +1,309 @@
-var engine = require('engine.io-stream');
-var http = require('http');
+var EventEmitter = require('events').EventEmitter;
+var assert = require('assert');
+var inherits = require('util').inherits;
 var JSONStream = require('JSONStream');
+var multiplex = require('multiplex');
+var now = require('performance-now');
 var split = require('split');
-var timestamp = require('monotonic-timestamp');
+var through2 = require('through2');
+var url = require('url');
 var xtend = require('xtend');
+var pkg = require('./package.json');
+var util = require('./util');
 
-var docs = require('endoc');
-var endpoints = require('./endpoints');
-var errors = require('./errors');
-var logs = require('./logs');
+//
+// endpoint handler
+//
+function Endo(api) {
+  if (!(this instanceof Endo)) {
+    return new Endo(api);
+  }
 
+  this.api = api;
+  this.endpoints = util.parse(api);
 
-exports.serve = function serve(config) {
   //
-  // bottom out with a 404
+  // copy default resposne headers for each instance
   //
-  var notFound = function (request) {
-    throw new errors.NotFound(request.url);
+  this.responseHeaders = xtend(this.responseHeaders);
+}
+
+inherits(Endo, EventEmitter);
+
+//
+// process endpoint with provided request context
+//
+Endo.prototype.request = function (request) {
+
+  //
+  // resolve to set up a promise chain for error trapping
+  //
+  var endo = this;
+  return Promise.resolve(request).then(function (context) {
+    request = context;
+
+    var endpoint = util.getEndpoint(endo.endpoints, request);
+
+    //
+    // ensure endpoint has a valid handler
+    //
+    var NYI_MESSAGE = 'Endpoint not implemented: ' + endpoint.path;
+    assert.equal(typeof endpoint.handler, 'function', NYI_MESSAGE);
+
+    //
+    // check authorization
+    //
+    endo.authorize(endpoint, request.user);
+
+    //
+    // invoke endpoint handler
+    //
+    request.endpointProcessingStarted = now();
+    return endpoint.handler(request);
+
+  }).then(function (result) {
+    request.endpointProcessingEnded = now();
+
+    //
+    // normalize response metadata and set default values
+    //
+    result.status || (result.status = 200);
+    result.headers = xtend(result.headers);
+
+    //
+    // add content-type for object mode bodies (whic are to be written as JSON)
+    //
+    if (util.isObjectMode(result.body)) {
+      var type = 'application/json';
+      if (util.isStream(result.body)) {
+        type += ';parse';
+      }
+      result.headers['content-type'] = type;
+    }
+
+    return result;
+  });
+};
+
+//
+// Default request handler
+//
+Endo.prototype.handleRequest = function (request, response) {
+  //
+  // invoke endpoint handler with request context
+  //
+  return Promise.resolve(request)
+    .then(this.initRequest.bind(this))
+    .then(this.request.bind(this))
+    .then(this.handleResponse.bind(this, response))
+    .catch(this.handleResponseError.bind(this, response));
+};
+
+//
+// default response processing
+//
+Endo.prototype.handleResponse = function (response, result) {
+  //
+  // allow errors to be returned directly
+  //
+  if (result instanceof Error) {
+    return this.handleResponseError(response, result);
+  }
+
+  this.writeResponseHead(response, result);
+  this.writeResponseBody(response, result);
+};
+
+Endo.prototype.writeResponseHead = function (response, result) {
+  if (!response.headersSent) {
+    result.headers = xtend(this.responseHeaders, result.headers);
+    response.writeHead(result.status, result.headers);
+  }
+};
+
+Endo.prototype.writeResponseBody = function (response, result) {
+  //
+  // run object mode body through body formatting
+  //
+  var body = result.body;
+
+  if (util.isObjectMode(body)) {
+    body = this.formatBodyObject(body);
+  }
+
+  util.isStream(body) ? body.pipe(response) : response.end(body);
+};
+
+Endo.prototype.formatBodyObject = function (body) {
+  //
+  // pipe objectMode streams through JSONStream
+  //
+  if (util.isStream(body)) {
+    return body.pipe(JSONStream.stringify());
+  }
+
+  return JSON.stringify(body, null, '  ');
+}
+
+//
+// default error handling just runs error through formatter
+//
+Endo.prototype.handleResponseError = function (response, error) {
+  return this.handleResponse(response, this.formatErrorObject(error));
+};
+
+//
+// transform an error into response with a JSON objeect body
+//
+Endo.prototype.formatErrorObject = function (error) {
+  var body = {
+    error: true,
+    name: error.name,
+    message: error.message
   };
 
-  //
-  // invoke default base handler or one provided with config
-  //
-  var handler = (config.handler || exports.handler)(notFound, config);
+  if (this.includeErrorStack) {
+    body.stack = error.stack;
+  }
+  return {
+    status: error.status || 500,
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: body
+  };
+};
 
-  //
-  // routing logic for identifying the correct endpoint
-  //
-  handler = endpoints.handler(handler, config);
+//
+// default response headers
+//
+Endo.prototype.responseHeaders = { server: 'Endo/' + pkg.version };
 
+//
+// authorization based on endpoint permissions list by default
+//
+Endo.prototype.authorize = function (endpoint, user) {
   //
-  // serve api docs, if requested
+  // bypass is user is undefined (implies no authentication scheme)
   //
-  if (config.docs) {
-    handler = docs.handler(handler, config);
+  if (user === undefined) {
+    return;
   }
 
   //
-  // add loggging, if requested
+  // bypass auth if no permissions associated with endpoint
   //
-  if (config.log) {
-    handler = logs.handler(handler, config);
+  var required = endpoint.permissions;
+  if (!required || !required.length) {
+    return;
   }
 
   //
-  // add error handler
+  // get permissions associated with user
   //
-  // TODO: cluster so we can fail hard
-  handler = errors.handler(handler, config);
-
-  function handleRequest(request, response) {
-
-    function writeResponse(data) {
-      //
-      // set default content-type
-      //
-      var body = data.body;
-      var headers = xtend(data.headers, config.headers);
-
-      //
-      // return values encoded as buffers bypass JSON encoding
-      //
-      if (body !== void 0 && !Buffer.isBuffer(body)) {
-        headers['content-type'] = 'application/json';
-        body = JSON.stringify(body, null, '  ');
-      }
-      //
-      // only write headers if they haven't already been sent
-      //
-      if (!response.headersSent) {
-        response.writeHead(data.status || 200, headers);
-      }
-      response.end(body);
-    }
-
-    function writeError(error) {
-      errors.log('RESPONSE STREAM ERROR', error.stack)
-      writeResponse(errors.response(error));
-    }
-
-    //
-    // look up handler for request
-    //
-    return Promise.resolve(handler(request)).then(function (data) {
-      var body = data.body;
-
-      if (body && typeof body.pipe === 'function') {
-        //
-        // write headers and pipe body to response stream
-        //
-        response.writeHead(data.status || 200, data.headers);
-        var transform = JSONStream.stringifyObject();
-        return body.pipe(transform).pipe(response);
-      }
-
-      //
-      // write data with non-stream bodiy as plain response
-      //
-      writeResponse(data);
-
-    }).catch(writeError);
+  var available = user && user.scope && user.scope.permissions;
+  if (!available || !available.length) {
+    throw new util.UnauthorizedError('Insufficient permissions');
   }
 
   //
-  // handler for websocket requests
+  // resolve complete permissions for permission lists given version's roles
   //
-  function handleEvent(stream) {
+  var roles = this.endpoints[endpoint.version].roles;
+  available = util.resolvePermissions(available, roles);
+  required = util.resolvePermissions(required, roles);
 
-    //
-    // helper for normalizing and serializing event data
-    //
-    function handleRequestEvent(request) {
-
-      function writeEvent(data) {
-        stream.write(JSON.stringify(xtend(event, data)) + '\n');
-      }
-
-      var event = { url: request.url };
-
-      //
-      // run event request payload through standard request processing
-      //
-      return Promise.resolve(handler(request)).then(function (data) {
-        var body = data.body;
-
-        if (body && typeof body.pipe === 'function') {
-          //
-          // streaming responses get an associated subscription id
-          //
-          event.subscriptionId = timestamp();
-
-          //
-          // write event record head, providing any handler metadata
-          //
-          writeEvent({
-            status: body.status,
-            headers: body.headers
-          });
-
-          // TODO: differentiate between array-like and map-like object streams
-          return body.on('data', function (chunk) {
-            //
-            // write data chunks to socket
-            //
-            writeEvent({
-              key: chunk[0],
-              value: chunk[1]
-            });
-          })
-          .on('close', function () {
-            //
-            // write null error key to signal request end
-            //
-            writeEvent({ error: null });
-          })
-        }
-
-        //
-        // non-streaming handler responses result in a single event record
-        //
-        return writeEvent(data);
-
-      })
-      .catch(function (error) {
-        errors.log('SOCKET STREAM ERROR', error)
-        writeEvent({ error: error });
-      });
-    }
-
-    stream.on('error', function (error) {
-      errors.log('SOCKET ERROR', error);
-    })
-    .pipe(split(JSON.parse))
-    .on('data', handleRequestEvent);
+  //
+  // authorize using required and available permissions
+  //
+  if (util.hasPermissions(required, available)) {
+    throw new util.UnauthorizedError('Insufficient permissions');
   }
+};
+
+//
+// gets semver range from request url, override to modify version range lookup
+//
+Endo.prototype.initRequest = function (request) {
+  //
+  // parse url into path components, slicing off the first (empty) element
+  //
+  var components = url.parse(request.url).pathname.split('/').slice(1);
 
   //
-  // spin up http server to handle requests
+  // shift off first element for version range, so specifiers like `^` work
   //
-  var server = http.createServer(handleRequest);
+  request.endpointRange = decodeURIComponent(components.shift());
 
-  server.on('error', function (error) {
-    errors.log('SERVER ERROR', error);
-  });
+  //
+  // serialize path components, sans version range, into endpoint path
+  //
+  request.endpointPath = '/' + components.join('/');
 
-  return new Promise(function (resolve, reject) {
-    server.listen(config.port, config.host, function (error) {
-      if (error) {
-        return reject(error);
-      }
+  return request;
+};
 
+//
+// normalize and copy relevant request context values onto source stream
+//
+Endo.prototype.initSocketRequest = function (stream, context, options) {
+  options || (options = {});
+  stream.method = context.headers || 'GET';
+  stream.headers = context.headers || {};
+  stream.user = options.user;
+  stream.url = context.url || '/*/';
+  return this.initRequest(stream);
+};
+
+//
+// creates a multiplexed stream for fielding requests over sockets
+//
+Endo.prototype.createStream = function (options) {
+  options || (options = {});
+
+  var endo = this;
+  return multiplex(options, function (stream, id) {
+
+    var headersReceived;
+    stream.pipe(split(/(\r?\n)/)).on('data', function (data) {
       //
-      // attach websocket server if requested
+      // we only care about the first line (analogous to HTTP headers)
       //
-      if (config.sockets) {
-        engine(handleEvent).attach(server, config.sockets.path || '/ws');
-      }
+      if (!headersReceived) {
+        headersReceived = true;
 
-      resolve(server);
+        //
+        // first line should be JSON-encoded request metadta
+        //
+        var request = endo.initSocketRequest(stream, JSON.parse(data));
+
+        //
+        // create a response stream and pipe to client
+        //
+        var response = new SocketResponse();
+        response.pipe(stream);
+
+        //
+        // run through standard request processing
+        //
+        endo.handleRequest(request, response);
+      }
     });
   });
-}
+};
 
-exports.handler = function (next) {
-  return function (request) {
-    if (request.endpoint && typeof request.endpoint.handler === 'function') {
-      return request.endpoint.handler(request);
-    }
-    return next(request);
-  }
-}
+//
+// through stream for socket response
+//
+var SocketResponse = through2.ctor();
+
+//
+// support writeHead method to allow us to reuse http response processing
+//
+SocketResponse.prototype.writeHead = function (status, headers) {
+  assert(!this.headersSent, 'Socket response headers already written');
+  this.headersSent = true;
+  this.write(JSON.stringify({ status: status, headers: headers }) + '\n');
+};
+
+module.exports = Endo;
