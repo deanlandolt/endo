@@ -4,7 +4,7 @@ var inherits = require('util').inherits;
 var JSONStream = require('JSONStream');
 var multiplex = require('multiplex');
 var now = require('performance-now');
-var split = require('split');
+var split2 = require('split2');
 var through2 = require('through2');
 var url = require('url');
 var xtend = require('xtend');
@@ -30,18 +30,31 @@ function Endo(api) {
 
 inherits(Endo, EventEmitter);
 
+Endo.prototype.request = function (request) {
+  //
+  // allow string url argument form
+  //
+  if (typeof request === 'string') {
+    request = { url: request };
+  }
+
+  return this.processRequest(request);
+}
+
 //
 // process endpoint with provided request context
 //
-Endo.prototype.request = function (request) {
-
-  //
-  // resolve to set up a promise chain for error trapping
-  //
+Endo.prototype.processRequest = function (request) {
   var endo = this;
-  return Promise.resolve(request).then(function (context) {
-    request = context;
 
+  function preprocess(request) {
+    return endo.parseRequest(request);
+  }
+
+  function process(request) {
+    //
+    // look up endpoint baesd on request context
+    //
     var endpoint = util.getEndpoint(endo.endpoints, request);
 
     //
@@ -58,11 +71,13 @@ Endo.prototype.request = function (request) {
     //
     // invoke endpoint handler
     //
-    request.endpointProcessingStarted = now();
-    return endpoint.handler(request);
+    request.endpointHandlerProcessingStart = now();
 
-  }).then(function (result) {
-    request.endpointProcessingEnded = now();
+    return endpoint.handler(request);
+  }
+
+  function postprocess(result) {
+    request.endpointHandlerProcessingEnd = now();
 
     //
     // reject empty responses
@@ -82,27 +97,58 @@ Endo.prototype.request = function (request) {
     // add content-type for object mode bodies (whic are to be written as JSON)
     //
     if (util.isObjectMode(result.body)) {
-      var type = 'application/json';
-      if (util.isStream(result.body)) {
-        type += ';parse';
-      }
-      result.headers['content-type'] = type;
+      var streamParam = util.isStream(result.body) ? ';parse' : '';
+      result.headers['content-type'] = 'application/json' + streamParam;
     }
 
     return result;
-  });
+  }
+
+  //
+  // resolve to set up a promise chain for error trapping
+  //
+  return Promise.resolve(request)
+    .then(preprocess)
+    .then(process)
+    .then(postprocess);
 };
 
 //
-// Default request handler
+// gets semver range from request url, override to modify version range lookup
+//
+Endo.prototype.parseRequest = function (request) {
+  //
+  // bypass lookup if endpoint path already provided
+  //
+  if (request.endpointPath) {
+    return request;
+  }
+  //
+  // parse url into path components, slicing off the first (empty) element
+  //
+  var components = url.parse(request.url).pathname.split('/').slice(1);
+
+  //
+  // shift off first element for version range, so specifiers like `^` work
+  //
+  request.endpointRange = decodeURIComponent(components.shift());
+
+  //
+  // serialize path components, sans version range, into endpoint path
+  //
+  request.endpointPath = '/' + components.join('/');
+
+  return request;
+};
+
+//
+// default request handler
 //
 Endo.prototype.handleRequest = function (request, response) {
   //
   // invoke endpoint handler with request context
   //
-  return Promise.resolve(request)
-    .then(this.initRequest.bind(this))
-    .then(this.request.bind(this))
+  return this.processRequest(request)
     .then(this.handleResponse.bind(this, response))
     .catch(this.handleResponseError.bind(this, response));
 };
@@ -135,6 +181,9 @@ Endo.prototype.writeResponseBody = function (response, result) {
   util.isStream(body) ? body.pipe(response) : response.end(body);
 };
 
+//
+// transform object mode bodies appropriately
+//
 Endo.prototype.formatBodyObject = function (body) {
   //
   // pipe objectMode streams through JSONStream
@@ -223,50 +272,22 @@ Endo.prototype.authorize = function (endpoint, user) {
 };
 
 //
-// gets semver range from request url, override to modify version range lookup
-//
-Endo.prototype.initRequest = function (request) {
-  //
-  // parse url into path components, slicing off the first (empty) element
-  //
-  var components = url.parse(request.url).pathname.split('/').slice(1);
-
-  //
-  // shift off first element for version range, so specifiers like `^` work
-  //
-  request.endpointRange = decodeURIComponent(components.shift());
-
-  //
-  // serialize path components, sans version range, into endpoint path
-  //
-  request.endpointPath = '/' + components.join('/');
-
-  return request;
-};
-
-//
-// normalize and copy relevant request context values onto source stream
-//
-Endo.prototype.initSocketRequest = function (stream, context, options) {
-  options || (options = {});
-  stream.method = context.headers || 'GET';
-  stream.headers = context.headers || {};
-  stream.user = options.user;
-  stream.url = context.url || '/*/';
-  return this.initRequest(stream);
-};
-
-//
 // creates a multiplexed stream for fielding requests over sockets
 //
 Endo.prototype.createStream = function (options) {
   options || (options = {});
 
   var endo = this;
-  return multiplex(options, function (stream, id) {
+  var source = multiplex(options, function (stream, id) {
+    //
+    // create a response stream and pipe to socket client
+    //
+    var response = new SocketResponse();
+    response.pipe(stream);
 
+    // TODO: request.pipe(MetadataStream()).on('meta', function (meta) { ... 
     var headersReceived;
-    stream.pipe(split(/(\r?\n)/)).on('data', function (data) {
+    stream.pipe(split2(/(\r?\n)/)).on('data', function (data) {
       //
       // we only care about the first line (analogous to HTTP headers)
       //
@@ -276,21 +297,39 @@ Endo.prototype.createStream = function (options) {
         //
         // first line should be JSON-encoded request metadta
         //
-        var request = endo.initSocketRequest(stream, JSON.parse(data));
+        try {
+          var context = JSON.parse(data);  
+        }
+        catch (error) {
+          return endo.handleResponseError(response, error);
+        }
 
         //
-        // create a response stream and pipe to client
+        // socket stream is used as the request context, copy on relevant keys
         //
-        var response = new SocketResponse();
-        response.pipe(stream);
+        // TODO: clean this up
+        stream.url = context.url;
+        stream.method = context.method;
+        stream.headers = context.headers;
+        stream.endpointPath = context.endpointPath;
+        stream.endpointRange = context.endpointRange;
+
+        //
+        // auth could be checked at handshake-time and persisted
+        //
+        stream.user = options.user;
 
         //
         // run through standard request processing
         //
-        endo.handleRequest(request, response);
+        endo.handleRequest(stream, response);
       }
     });
   });
+
+  var errors = source.createStream('error');
+
+  return source;
 };
 
 //

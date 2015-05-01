@@ -27,7 +27,7 @@ util.parse = function(api) {
     return lodash.union(lodash.compact(perms), parent);
   }
 
-  function process(api, parsed) {
+  function parse(api, parsed) {
     var version = api.version = api.version || '*';
     var routes = parsed[version] = parsed[version] = {};
     var roles = api.roles = resolveRoles(api.roles || {});
@@ -62,14 +62,14 @@ util.parse = function(api) {
       // parse previous api routes if provided
       //
       if (api.previous) {
-        process(api.previous, parsed);
+        parse(api.previous, parsed);
       }
     }
 
     return parsed;
   }
 
-  return process(api || {}, {});
+  return parse(api || {}, {});
 };
 
 //

@@ -18,15 +18,12 @@ function auth(endo, options) {
   endo.verifyToken = auth.verifyToken.bind(null, options.verify);
 
   //
-  // verify provided credentials are valid and return auth context
+  // verify provided credentials are valid and set user auth on request
   //
-  var _handleRequest = endo.handleRequest;
-  endo.handleRequest = function(request) {
-    var args = arguments;
-
-    return Promise.resolve(endo.authenticate(request)).then(function () {
-      return _handleRequest.apply(endo, args);
-    });
+  var _parseRequest = endo.handleRequest;
+  endo.parseRequest = function() {
+    var request = _parseRequest.apply(this, arguments);
+    return Promise.resolve(request).then(this.authenticate.bind(this));
   };
 
   endo.authenticate = function (request) {
@@ -38,7 +35,7 @@ function auth(endo, options) {
     }
 
     //
-    // parse auth header for JWT token
+    // parse authorization header for JWT token
     //
     request.headers || (request.headers || {});
     var header = request.headers && request.headers.authorization || '';

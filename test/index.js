@@ -13,10 +13,52 @@ coro.run(function* () {
   var api = endo(config.api);
   var result;
 
-  result = yield api.request({ endpointPath: '/foo/a' });
-  assert.equal(result.status, 200);
-  assert.deepEqual(result.headers, { 'content-type': 'application/json' });
-  assert.deepEqual(result.body, { foo: 'a' });
+  //
+  // equivalent requests on various ranges
+  //
+  var ranges = [
+    'v1.0.0',
+    'v1.0',
+    'v1',
+    '1.0.0',
+    '1.0',
+    '1',
+    '=1.0',
+    '>=1.0',
+    '<=1.0',
+    '^1.0',
+    '~1.0',
+  ]
+
+  //
+  // various endo request call forms
+  //
+  var path = '/foo/a';
+  var url = '/*' + path;
+  var contexts = [
+    url,
+    { url: url },
+    { url: url, method: 'gEt' },
+    { endpointPath: path },
+    { endpointPath: path, endpointRange: '*' }
+  ];
+
+  ranges.forEach(function (range) {
+    url = '/' + range + path;
+    contexts.push(url);
+    contexts.push({ url: url });
+    contexts.push({ url: url, method: 'GeT' });
+    contexts.push({ endpointPath: path });
+    contexts.push({ endpointPath: path, endpointRange: range });
+  });
+
+  for (var i in contexts) {
+    result = yield api.request(contexts[i]);
+
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.headers, { 'content-type': 'application/json' });
+    assert.deepEqual(result.body, { foo: 'a' });
+  }
 
 
   //
