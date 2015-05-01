@@ -32,9 +32,10 @@ coro.run(function* () {
   //
   // when enabling auth, bad authenticate invocations should throw Unauthorized
   //
+  // TODO: move this into a loop
   try {
     yield api.authenticate(context);
-    assert(false);
+    assert(false, 'Should have thrown');
   }
   catch (e) {
     assert.equal(e.status, 401, 'Should be a 401 Unauthorized error');
@@ -44,7 +45,7 @@ coro.run(function* () {
   context.headers.authorization = 'Bearer';
   try {
     yield api.authenticate(context);
-    assert(false);
+    assert(false, 'Should have thrown');
   }
   catch (e) {
     assert.equal(e.status, 401, 'Should be a 401 Unauthorized error');
@@ -53,7 +54,7 @@ coro.run(function* () {
   context.headers.authorization = 'Bearer XXX';
   try {
     yield api.authenticate(context);
-    assert(false);
+    assert(false, 'Should have thrown');
   }
   catch (e) {
     assert.equal(e.status, 401, 'Should be a 401 Unauthorized error');
@@ -62,7 +63,7 @@ coro.run(function* () {
   context.headers.authorization = 'Bearer ' + encoded;
   try {
     yield api.authenticate(context);
-    assert(false);
+    assert(false, 'Should have thrown');
   }
   catch (e) {
     assert.equal(e.status, 401, 'Should be a 401 Unauthorized error');

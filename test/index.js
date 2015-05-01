@@ -19,13 +19,37 @@ coro.run(function* () {
   assert.deepEqual(result.body, { foo: 'a' });
 
 
-  var endpoints = config.api.sections.bodyTests.endpoints;
-  var endpoint;
-  for (var name in endpoints) {
+  //
+  // body tests
+  //
+  var endpoints, endpoint, name;
+  endpoints = config.api.sections.bodyTests.endpoints;
+  for (name in endpoints) {
     endpoint = endpoints[name];
-    console.log(endpoint.path)
+    console.log(endpoint.path);
+
     result = yield api.request({ endpointPath: endpoint.path });
     yield endpoint.handler.verify(result);
+  }
+
+  //
+  // exception tests
+  //
+  endpoints = config.api.sections.exceptionTests.endpoints;
+  for (name in endpoints) {
+    endpoint = endpoints[name];
+    console.log(endpoint.path);
+
+    try {
+      result = yield api.request({ endpointPath: endpoint.path });
+      assert(false, 'Should have thrown');
+    }
+    catch (e) {
+      assert(e.message !== 'Should have thrown', e.message);
+      if (endpoint.__errorMessage__) {
+        assert.equal(e.message, endpoint.__errorMessage__, 'Bad error message');
+      }
+    }
   }
 
 });

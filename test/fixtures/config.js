@@ -1,58 +1,157 @@
 var assert = require('assert');
-var highland = require('highland');
+var concat = require('concat-stream');
 var spigot = require('stream-spigot');
+var through2 = require('through2');
+var xtend = require('xtend');
+var util = require('../../util');
 
+function verifyResponse(opts, response) {
+  return Promise.resolve(response).then(function (response) {
+    //
+    // verify response metadata
+    //
+    assert.strictEqual(response.status, opts.status);
+    assert.deepEqual(response.headers, opts.headers);
 
-function literalHandler(options) {
-  options || (options = {});
+    //
+    // verify we got the right kind of body
+    //
+    var body = response.body;
+    var stream = util.isStream(body);
+    assert.equal(opts.stream, stream, 'Incorrect response stream type');
 
-  var expectedHeaders = {};
-  if (!Buffer.isBuffer(options && options.body)) {
-    expectedHeaders['content-type'] = 'application/json';
-  }
+    var objMode = util.isObjectMode(body);
+    assert.equal(opts.objectMode, objMode, 'Incorrect object mode');
 
-  var handler = function (req) {
-    return { body: options.body };
-  };
+    //
+    // validate stream response body
+    //
+    if (stream) {
+      return new Promise(function (resolve, reject) {
 
-  handler.verify = function (res) {
-    assert.strictEqual(res.status, 200);
-    assert.deepEqual(res.headers, expectedHeaders);
+        //
+        // figure out encoding for concat-stream
+        //
+        var encoding;
+        if (objMode) {
+          encoding = 'array';
 
-    assert.deepEqual(res.body, options.body);
-  };
+          //
+          // unbreak concat-stream behavior for object mode streams
+          //
+          body = body.pipe(through2.obj(function (chunk, enc, cb) {
+            cb(null, [ chunk ]);
+          }));
+        }
 
-  return handler;
-}
+        //
+        // sniff for string streams
+        //
+        else if (typeof opts.chunks[0] === 'string') {
+          encoding = 'string';
+        }
 
-function streamHandler(options) {
-  options || (options = {});
+        //
+        // concat stream and test results
+        //
+        body.pipe(concat({ encoding: encoding }, function (result) {
+          var expected = opts.items;
 
-  var expectedHeaders = {};
-  if (options.objectMode) {
-    expectedHeaders['content-type'] = 'application/json';
-  }
+          if (objMode) {
+            assert.deepEqual(result, expected, 'Invalid objectMode stream');
+          }
+          else if (encoding === 'string') {
+            expected = String.prototype.concat.apply('', opts.chunks);
+            assert.strictEqual(result, expected, 'Invalid string stream');
+          }
+          else {
+            expected = Buffer.concat(opts.chunks);
+            assert.deepEqual(result, expected, 'Invalid buffer stream');
+          }
 
-  var handler = function (req) {
-    return { body: spigot(options, options.data) };
-  };
+          resolve(response);
 
-  handler.verify = function (res) {
-    assert.strictEqual(res.status, 200);
-    assert.deepEqual(res.headers, expectedHeaders);
+        }));
 
-    return new Promise(function (resolve, reject) {
-      highland(res.body).errors(function (error) {
-        reject(error);
-      }).toArray(function (array) {
-        assert.deepEqual(array, options.data);
-        resolve();
       });
-    });
+    }
+
+    //
+    // validate value response body
+    //
+    assert.deepEqual(body, opts.body, 'Invalid body value');
+    return response;
+
+  });
+}
+
+function successHandler(opts) {
+  //
+  // set up handler response and expected values
+  //
+  var res = {};
+
+  if (opts.status) {
+    res.status = opts.status;
+  }
+  else {
+    opts.status = 200;
+  }
+
+  if (opts.headers) {
+    res.headers = xtend(opts.headers);
+  }
+  opts.headers = xtend(opts.headers);
+
+  //
+  // determine stream and object mode
+  //
+  opts.stream = !!(opts.items || opts.chunks);
+  opts.objectMode = opts.stream ? !!opts.items : util.isObjectMode(opts.body);
+
+  //
+  // object stream response
+  //
+  if (opts.objectMode) {
+    opts.headers['content-type'] = 'application/json' + (opts.stream ? ';parse' : '');
+  }
+
+  var handler = function (request) {
+    //
+    // defensively copy all the things
+    //
+    var response = xtend(res);
+
+    if (response.headers) {
+      response.headers = xtend(response.headers);
+    }
+
+    if (opts.objectMode) {
+      if (opts.stream) {
+        response.body = spigot({ objectMode: true }, opts.items.slice());
+      }
+      else {
+        response.body = JSON.parse(JSON.stringify(opts.body));
+      }
+    }
+    else {
+      if (opts.stream) {
+        response.body = spigot(opts.chunks.slice());
+      }
+      else {
+        // TODO: copy buffer instance
+        response.body = opts.body;
+      }
+    }
+
+    return response;
   };
+
+  handler.verify = verifyResponse.bind(null, opts);
 
   return handler;
 }
+
 
 module.exports = {
   api: {
@@ -67,68 +166,66 @@ module.exports = {
     sections: {
       bodyTests: {
         endpoints: {
-          // empty: {
-          //   path: '/body/empty',
-          //   handler: literalHandler({ body: undefined })
-          // },
           nullLiteral: {
             path: '/body/literal/null',
-            handler: literalHandler({ body: null })
+            handler: successHandler({ body: null })
           },
           booleanLiteral: {
             path: '/body/literal/boolean',
-            handler: literalHandler({ body: true })
+            handler: successHandler({ body: true })
           },
           numberLiteral: {
             path: '/body/literal/number',
-            handler: literalHandler({ body: -12.345 })
+            handler: successHandler({ body: -12.345 })
           },
           // dateLiteral
           bufferLiteral: {
             path: '/body/literal/buffer',
-            handler: literalHandler({
+            handler: successHandler({
               body: Buffer('hello buffer', 'utf8')
             })
           },
           stringLiteral: {
             path: '/body/literal/string',
-            handler: literalHandler({
+            handler: successHandler({
               body: 'hello there'
             })
           },
           arrayLiteral: {
             path: '/body/literal/array',
-            handler: literalHandler({
+            handler: successHandler({
               body: [ 'foo', 'array', 1, 2, '3' ]
             })
           },
           objectLiteral: {
             path: '/body/literal/object',
-            handler: literalHandler({
+            handler: successHandler({
               body: { foo: 'object' }
             })
           },
-          // bufferStream: {
-          //   path: '/body/stream/buffer',
-          //   handler: streamHandler({
-          //     body: [ Buffer('hell', 'utf8'), Buffer('o...', 'utf8') ]
-          //   })
-          // },
-          // stringStream: {
-          //   path: '/body/stream/string',
-          //   handler: streamHandler({
-          //     body: [
-          //       'hell',
-          //       'o ',
-          //       'world'
-          //     ]
-          //   })
-          // },
+          bufferStream: {
+            path: '/body/stream/buffer',
+            handler: successHandler({
+              chunks: [
+                Buffer('hell', 'utf8'),
+                Buffer('o...', 'utf8')
+              ]
+            })
+          },
+          stringStream: {
+            path: '/body/stream/string',
+            handler: successHandler({
+              chunks: [
+                'hell',
+                'o ',
+                'world'
+              ]
+            })
+          },
           arrayStream: {
             path: '/body/stream/array',
-            handler: streamHandler({
-              objectMode: true,
-              data: [
+            handler: successHandler({
+              items: [
                 [ 'temp', -2.2 ],
                 [ 'temp', -40 ],
                 [ 'temp', 212 ],
@@ -138,24 +235,63 @@ module.exports = {
           },
           objectStream: {
             path: '/body/stream/object',
-            handler: streamHandler({
-              objectMode: true,
-              data: [
+            handler: successHandler({
+              items: [
                 { temp: -2.2, unit: 'F' },
                 { temp: -40, unit: 'F' },
                 { temp: 212, unit: 'F' },
                 { temp: 22, unit: 'C' },
               ]
             })
-          }
+          },
         }
       },
 
-      failTests: {
+      exceptionTests: {
         endpoints: {
           noHandler: {
-            path: '/fail/no-handler'
-          }
+            path: '/fail/on/no-handler'
+          },
+          emptyResponse: {
+            path: '/fail/on/empty/response',
+            handler: function () {
+              return undefined;
+            }
+          },
+          invalidResponse: {
+            path: '/fail/on/invalid/body',
+            handler: function () {
+              return 123;
+            }
+          },
+          emptyBody: {
+            path: '/fail/on/empty/body',
+            handler: function () {
+              return { body: undefined };
+            }
+          },
+          circularBody: {
+            path: '/fail/on/circular/body',
+            handler: function () {
+              var a = {};
+              var b = { a: a };
+              return a.b = b;
+            }
+          },
+          throw: {
+            path: '/fail/on/throw',
+            handler: function () {
+              throw new Error('Expected');
+            }
+          },
+          promiseReject: {
+            path: '/fail/on/promise/reject',
+            handler: function () {
+              return new Promise(function (resolve, reject) {
+                reject(new Error('Expected'));
+              });
+            }
+          },
         }
       },
 
@@ -183,7 +319,7 @@ module.exports = {
             handler: function () {
               return { body: { foo: 'b' } }
             }
-          }
+          },
         }
       }
     }

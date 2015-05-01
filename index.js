@@ -65,6 +65,14 @@ Endo.prototype.request = function (request) {
     request.endpointProcessingEnded = now();
 
     //
+    // reject empty responses
+    //
+    var body = result && result.body;
+    if (body === undefined) {
+      throw new Error('Empty response');
+    }
+
+    //
     // normalize response metadata and set default values
     //
     result.status || (result.status = 200);
@@ -103,13 +111,6 @@ Endo.prototype.handleRequest = function (request, response) {
 // default response processing
 //
 Endo.prototype.handleResponse = function (response, result) {
-  //
-  // allow errors to be returned directly
-  //
-  if (result instanceof Error) {
-    return this.handleResponseError(response, result);
-  }
-
   this.writeResponseHead(response, result);
   this.writeResponseBody(response, result);
 };

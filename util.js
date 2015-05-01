@@ -159,7 +159,7 @@ util.isObjectMode = function (body) {
     return !!body._readableState.objectMode;
   }
 
-  return body !== undefined && !Buffer.isBuffer(body);
+  return !Buffer.isBuffer(body);
 }
 
 //
