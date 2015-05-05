@@ -1,5 +1,4 @@
 var jwt = require('jsonwebtoken');
-var lodash = require('lodash');
 var util = require('./util');
 
 //
@@ -11,6 +10,8 @@ var BEARER_RE = /^bearer\s+(.+)$/i;
 // wrapper to add JWT-based bearer auth to an endo instance
 //
 function auth(endo, options) {
+  options || (options = {});
+
   //
   // add token utility methods, binding first options arg
   //
@@ -20,7 +21,7 @@ function auth(endo, options) {
   //
   // verify provided credentials are valid and set user auth on request
   //
-  var _parseRequest = endo.handleRequest;
+  var _parseRequest = endo.parseRequest;
   endo.parseRequest = function() {
     var request = _parseRequest.apply(this, arguments);
     return Promise.resolve(request).then(this.authenticate.bind(this));
@@ -65,6 +66,7 @@ auth.createToken = function (options, data) {
 
 auth.verifyToken = function (options, token) {
   options || (options = {});
+
   // TODO: warn on empty secret?
   return new Promise(function (resolve, reject) {
     jwt.verify(token, options.secret, options.verify, function (error, data) {

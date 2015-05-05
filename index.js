@@ -4,23 +4,27 @@ var inherits = require('util').inherits;
 var JSONStream = require('JSONStream');
 var multiplex = require('multiplex');
 var now = require('performance-now');
-var split2 = require('split2');
-var through2 = require('through2');
 var url = require('url');
 var xtend = require('xtend');
-var pkg = require('./package.json');
+
+var metadata = require('./package.json');
 var util = require('./util');
 
 //
 // endpoint handler
 //
 function Endo(api) {
+  if (api instanceof Endo) {
+    return api;
+  }
+
   if (!(this instanceof Endo)) {
     return new Endo(api);
   }
 
-  this.api = api;
   this.endpoints = util.parse(api);
+  this.source = api;
+  this.version = api.version;
 
   //
   // copy default resposne headers for each instance
@@ -29,6 +33,26 @@ function Endo(api) {
 }
 
 inherits(Endo, EventEmitter);
+
+//
+// test request to determine if it contains has a valid range component in url
+//
+Endo.prototype.test = function (request, response) {
+  var range = request.url.split('/')[1];
+  return range && util.validRange(range);
+};
+
+//
+// default request handler
+//
+Endo.prototype.handle = function (request, response) {
+  //
+  // invoke endpoint handler with request context
+  //
+  return this.processRequest(request)
+    .then(this.handleResponse.bind(this, response))
+    .catch(this.handleResponseError.bind(this, response));
+};
 
 Endo.prototype.request = function (request) {
   //
@@ -39,7 +63,7 @@ Endo.prototype.request = function (request) {
   }
 
   return this.processRequest(request);
-}
+};
 
 //
 // process endpoint with provided request context
@@ -47,7 +71,13 @@ Endo.prototype.request = function (request) {
 Endo.prototype.processRequest = function (request) {
   var endo = this;
 
-  function preprocess(request) {
+  function preflight(request) {
+    //
+    // add timing info to request context
+    //
+    request.endo = request.endo || {};
+    request.endo.started = now();
+
     return endo.parseRequest(request);
   }
 
@@ -76,7 +106,7 @@ Endo.prototype.processRequest = function (request) {
     return endpoint.handler(request);
   }
 
-  function postprocess(result) {
+  function success(result) {
     request.endpointHandlerProcessingEnd = now();
 
     //
@@ -101,16 +131,35 @@ Endo.prototype.processRequest = function (request) {
       result.headers['content-type'] = 'application/json' + streamParam;
     }
 
+    //
+    // add timing and emit success event
+    //
+    request.endo.ended = now();
+    endo.emit('endpointSuccess', result, request);
+
     return result;
+  }
+
+  function failure(error) {
+    //
+    // add timing and emit failure event
+    //
+    request.endo.ended = now();
+    endo.emit('endpointFailure', error, request);
+
+    //
+    // rethrow error
+    //
+    throw error;
   }
 
   //
   // resolve to set up a promise chain for error trapping
   //
   return Promise.resolve(request)
-    .then(preprocess)
+    .then(preflight)
     .then(process)
-    .then(postprocess);
+    .then(success, failure);
 };
 
 //
@@ -139,18 +188,6 @@ Endo.prototype.parseRequest = function (request) {
   request.endpointPath = '/' + components.join('/');
 
   return request;
-};
-
-//
-// default request handler
-//
-Endo.prototype.handleRequest = function (request, response) {
-  //
-  // invoke endpoint handler with request context
-  //
-  return this.processRequest(request)
-    .then(this.handleResponse.bind(this, response))
-    .catch(this.handleResponseError.bind(this, response));
 };
 
 //
@@ -218,7 +255,8 @@ Endo.prototype.formatErrorObject = function (error) {
   return {
     status: error.status || 500,
     headers: {
-      'content-type': 'application/json'
+      'content-type': 'application/json',
+      'x-endo-error': error.message
     },
     body: body
   };
@@ -227,7 +265,7 @@ Endo.prototype.formatErrorObject = function (error) {
 //
 // default response headers
 //
-Endo.prototype.responseHeaders = { server: 'Endo/' + pkg.version };
+Endo.prototype.responseHeaders = { server: 'Endo/' + metadata.version };
 
 //
 // authorization based on endpoint permissions list by default
@@ -278,72 +316,52 @@ Endo.prototype.createStream = function (options) {
   options || (options = {});
 
   var endo = this;
-  var source = multiplex(options, function (stream, id) {
+  var source = multiplex({ error: true }, function (stream, meta) {
+    stream.on('error', console.error);
+
+    var context = JSON.parse(meta);
+
     //
-    // create a response stream and pipe to socket client
+    // auth could be checked at handshake-time and persisted
     //
-    var response = new SocketResponse();
-    response.pipe(stream);
+    context.user = options.user;
 
-    // TODO: request.pipe(MetadataStream()).on('meta', function (meta) { ... 
-    var headersReceived;
-    stream.pipe(split2(/(\r?\n)/)).on('data', function (data) {
-      //
-      // we only care about the first line (analogous to HTTP headers)
-      //
-      if (!headersReceived) {
-        headersReceived = true;
+    //
+    // run through standard endpoint request handling logic
+    //
+    var response;
+    endo.request(context)
+      .then(function (result) {
+        var meta = JSON.stringify({
+          id: context.id,
+          status: result.status,
+          headers: result.headers
+        });
 
-        //
-        // first line should be JSON-encoded request metadta
-        //
-        try {
-          var context = JSON.parse(data);  
+        response = source.createStream(meta);
+        var body = result.body;
+
+        if (util.isObjectMode(body)) {
+          body = endo.formatBodyObject(body);
         }
-        catch (error) {
-          return endo.handleResponseError(response, error);
+
+        util.isStream(body) ? body.pipe(response) : response.end(body);
+      })
+      .catch(function (error) {
+        if (!response) {
+          var meta = JSON.stringify({
+            id: context.id,
+            error: true
+          });
+          response = response = source.createStream(meta);
         }
+        response.emit('error', error);
+      });
+  })
 
-        //
-        // socket stream is used as the request context, copy on relevant keys
-        //
-        // TODO: clean this up
-        stream.url = context.url;
-        stream.method = context.method;
-        stream.headers = context.headers;
-        stream.endpointPath = context.endpointPath;
-        stream.endpointRange = context.endpointRange;
-
-        //
-        // auth could be checked at handshake-time and persisted
-        //
-        stream.user = options.user;
-
-        //
-        // run through standard request processing
-        //
-        endo.handleRequest(stream, response);
-      }
-    });
-  });
-
-  var errors = source.createStream('error');
+  source.on('error', console.error);
 
   return source;
-};
-
-//
-// through stream for socket response
-//
-var SocketResponse = through2.ctor();
-
-//
-// support writeHead method to allow us to reuse http response processing
-//
-SocketResponse.prototype.writeHead = function (status, headers) {
-  assert(!this.headersSent, 'Socket response headers already written');
-  this.headersSent = true;
-  this.write(JSON.stringify({ status: status, headers: headers }) + '\n');
 };
 
 module.exports = Endo;

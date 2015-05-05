@@ -1,3 +1,4 @@
+var assert = require('assert');
 var inherits = require('util').inherits;
 var lodash = require('lodash');
 var paramify = require('paramify');
@@ -28,8 +29,10 @@ util.parse = function(api) {
   }
 
   function parse(api, parsed) {
-    var version = api.version = api.version || '*';
-    var routes = parsed[version] = parsed[version] = {};
+    var version = api.version = semver.valid(api.version);
+    assert(version, 'Invalid API version specified: ' + api.version);
+
+    var routes = parsed[version] = {};
     var roles = api.roles = resolveRoles(api.roles || {});
 
     //
@@ -47,14 +50,14 @@ util.parse = function(api) {
 
         if (endpoint.path) {
           //
-          // add endpoint descriptor to route map
-          //
-          routes[endpoint.path] = endpoint;
-
-          //
           // normalize method names
           //
           endpoint.method = (endpoint.method || 'GET').toUpperCase();
+
+          //
+          // add endpoint descriptor to route map
+          //
+          routes[endpoint.method + ':' + endpoint.path] = endpoint;
         }
       }
 
@@ -72,6 +75,8 @@ util.parse = function(api) {
   return parse(api || {}, {});
 };
 
+util.validRange = semver.validRange;
+
 //
 // look up an endpoint from provided context:
 // requires endpointPath value, with optional method and endpointRange
@@ -82,7 +87,7 @@ util.getEndpoint = function (endpoints, context) {
     throw new util.NotFoundError('No path provided');
   }
 
-  var range = semver.validRange(context.endpointRange || '*');
+  var range = util.validRange(context.endpointRange || '*');
   if (range == null) {
     throw new util.NotFoundError('Invalid range: ' + context.endpointRange);
   }
@@ -91,35 +96,31 @@ util.getEndpoint = function (endpoints, context) {
   var method = (context.method || 'GET').toUpperCase();
 
   //
-  // find a candidate set of allowable versions for route matching
+  // iterate over available routes for all versions (naturally descending)
   //
-  var candidates = {};
-  Object.keys(endpoints).forEach(function (version) {
-    if (version === '*' || semver.satisfies(version, range)) {
-      candidates[version] = endpoints[version];
+  for (var version in endpoints) {
+    if (!semver.satisfies(version, range)) {
+      continue;
     }
-  });
 
-  //
-  // iterate over available routes for all candidate versions (descending)
-  //
-  for (var version in candidates) {
-    var candidate = candidates[version];
-    for (var route in candidate) {
-      endpoint = candidate[route];
+    var candidates = endpoints[version];
+    for (var route in candidates) {
+      endpoint = candidates[route];
+      if (endpoint.method === method) {
 
-      //
-      // match route by provided path and optional method
-      //
-      // TODO: cache transform or replace with route matcher that does curlies
-      var mungedRoute = route.replace(/\{(.*)\}/g, ':$1');
-      if (method == endpoint.method && match(mungedRoute)) {
         //
-        // add endpoint and match params to context and return endpoint
+        // match route by provided path and optional method
         //
-        context.endpoint = endpoint;
-        context.endpointParams = match.params;
-        return endpoint;
+        // TODO: cache transform or replace with route matcher that does curlies
+        var mungedPath = endpoint.path.replace(/\{(.*)\}/g, ':$1');
+        if (match(mungedPath)) {
+          //
+          // add endpoint and match params to context and return endpoint
+          //
+          context.endpoint = endpoint;
+          context.endpointParams = match.params;
+          return endpoint;
+        }
       }
     }
   }
@@ -127,7 +128,7 @@ util.getEndpoint = function (endpoints, context) {
   //
   // no endpoint found
   //
-  throw new util.NotFoundError(path + ' @' + range);
+  throw new util.NotFoundError(method + ' ' + path + ' @ ' + range);
 };
 
 //
@@ -151,12 +152,12 @@ util.hasPermissions = function (required, available) {
 };
 
 util.isStream = function (body) {
-  return body ? typeof body.pipe === 'function' : false;
+  return !!(body && typeof body.pipe === 'function');
 }
 
 util.isObjectMode = function (body) {
   if (util.isStream(body)) {
-    return !!body._readableState.objectMode;
+    return !!(body._readableState && body._readableState.objectMode);
   }
 
   return !Buffer.isBuffer(body);

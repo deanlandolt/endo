@@ -2,7 +2,7 @@ var assert = require('assert');
 var coro = require('copromise');
 var auth = require('../auth');
 var endo = require('../');
-var config = require('./fixtures/config')
+var API_FIXTURE = require('./fixtures/api');
 
 coro.run(function* () {
   //
@@ -14,19 +14,19 @@ coro.run(function* () {
   var decoded = yield auth.verifyToken(options, encoded);
   assert.deepEqual(decoded, data, 'JWT payload should round trip');
 
-  var api = endo(config.api);
+  var noAuth = endo(API_FIXTURE);
 
   //
   // no authenticate method by default
   //
-  assert(!api.authenticate, 'No authentication by default');
-
-
+  assert(!noAuth.authenticate, 'No authentication by default');
 
   //
   // test auth wrappper
   //
-  api = auth(api, config.auth);
+  var config = { secret: '...' };
+  api = auth(API_FIXTURE, config);
+
   var context = {};
 
   //

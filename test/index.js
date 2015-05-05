@@ -4,13 +4,13 @@ var assert = require('assert');
 var coro = require('copromise');
 var auth = require('../auth');
 var endo = require('../');
-var config = require('./fixtures/config')
+var API_FIXTURE = require('./fixtures/api');
+var api = endo(API_FIXTURE);
 
 //
 // the `run` method rethrows exceptions in next turn, failing loudly
 //
 coro.run(function* () {
-  var api = endo(config.api);
   var result;
 
   //
@@ -65,7 +65,7 @@ coro.run(function* () {
   // body tests
   //
   var endpoints, endpoint, name;
-  endpoints = config.api.sections.bodyTests.endpoints;
+  endpoints = API_FIXTURE.sections.bodyTests.endpoints;
   for (name in endpoints) {
     endpoint = endpoints[name];
     console.log(endpoint.path);
@@ -77,7 +77,7 @@ coro.run(function* () {
   //
   // exception tests
   //
-  endpoints = config.api.sections.exceptionTests.endpoints;
+  endpoints = API_FIXTURE.sections.exceptionTests.endpoints;
   for (name in endpoints) {
     endpoint = endpoints[name];
     console.log(endpoint.path);
