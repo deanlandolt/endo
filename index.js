@@ -86,7 +86,6 @@ Endo.prototype.processRequest = function (request) {
     // look up endpoint baesd on request context
     //
     var endpoint = util.getEndpoint(endo.endpoints, request);
-
     //
     // ensure endpoint has a valid handler
     //
@@ -103,10 +102,19 @@ Endo.prototype.processRequest = function (request) {
     //
     request.endpointHandlerProcessingStart = now();
 
-    return endpoint.handler(request);
+    //
+    // invoke endpoint and resolve request and possible body promises
+    //
+    return Promise.resolve(endpoint.handler(request)).then(function (result) {
+      return Promise.resolve(result.body).then(function (body) {
+        result.body = body;
+        return result;
+      })
+    });
   }
 
   function success(result) {
+
     request.endpointHandlerProcessingEnd = now();
 
     //
@@ -167,7 +175,7 @@ Endo.prototype.processRequest = function (request) {
 //
 Endo.prototype.parseRequest = function (request) {
   //
-  // bypass lookup if endpoint path already provided
+  // bypass version lookup if endpoint path already provided
   //
   if (request.endpointPath) {
     return request;
@@ -316,48 +324,48 @@ Endo.prototype.createStream = function (options) {
   options || (options = {});
 
   var endo = this;
-  var source = multiplex({ error: true }, function (stream, meta) {
-    stream.on('error', console.error);
+  var source = multiplex(function (stream, meta) {
+    // TODO: request body stream
 
-    var context = JSON.parse(meta);
+    var request = JSON.parse(meta);
 
     //
     // auth could be checked at handshake-time and persisted
     //
-    context.user = options.user;
+    request.user = options.user;
 
     //
     // run through standard endpoint request handling logic
     //
     var response;
-    endo.request(context)
-      .then(function (result) {
-        var meta = JSON.stringify({
-          id: context.id,
-          status: result.status,
-          headers: result.headers
-        });
-
-        response = source.createStream(meta);
-        var body = result.body;
-
-        if (util.isObjectMode(body)) {
-          body = endo.formatBodyObject(body);
-        }
-
-        util.isStream(body) ? body.pipe(response) : response.end(body);
-      })
-      .catch(function (error) {
-        if (!response) {
-          var meta = JSON.stringify({
-            id: context.id,
-            error: true
-          });
-          response = response = source.createStream(meta);
-        }
-        response.emit('error', error);
+    endo.request(request).then(function (result) {
+      var meta = JSON.stringify({
+        id: request.id,
+        status: result.status,
+        headers: result.headers
       });
-  })
+
+      response = source.createStream(meta);
+      var body = result.body
+      if (util.isObjectMode(body)) {
+        body = endo.formatBodyObject(body);
+      }
+
+      util.isStream(body) ? body.pipe(response) : response.end(body);
+
+    })
+    .catch(function (error) {
+      if (!response) {
+        var meta = JSON.stringify({
+          id: request.id,
+          error: true
+        });
+        response = response = source.createStream(meta);
+      }
+      response.emit('error', error);
+
+    });
+  });
 
   source.on('error', console.error);
 
