@@ -24,13 +24,7 @@ module.exports = {
           path: '/body/literal/number',
           handler: handlerUtil.success({ body: -12.345 })
         },
-        // dateLiteral
-        bufferLiteral: {
-          path: '/body/literal/buffer',
-          handler: handlerUtil.success({
-            body: Buffer('hello buffer', 'utf8')
-          })
-        },
+        // TODO: dates, buffers
         stringLiteral: {
           path: '/body/literal/string',
           handler: handlerUtil.success({
@@ -104,24 +98,30 @@ module.exports = {
             return undefined;
           }
         },
-        invalidResponse: {
+        // TODO: split request/handle tests (this only throws when stringified)
+        // circularBody: {
+        //   path: '/fail/on/circular/body',
+        //   handler: function () {
+        //     var a = {};
+        //     var b = { a: a };
+        //     return a.b = b;
+        //   }
+        // },
+        invalidBody: {
           path: '/fail/on/invalid/body',
-          handler: function () {
-            return 123;
+          handler: function (req) {
+            var res = {};
+            res[req.endo.COMPLETE_RESPONSE] = true;
+            return res;
           }
         },
-        emptyBody: {
+        nonStreamBody: {
           path: '/fail/on/empty/body',
-          handler: function () {
-            return { body: undefined };
-          }
-        },
-        circularBody: {
-          path: '/fail/on/circular/body',
-          handler: function () {
-            var a = {};
-            var b = { a: a };
-            return a.b = b;
+          handler: function (req) {
+            var res = {};
+            res[req.endo.COMPLETE_RESPONSE] = true;
+            res.body = 'foo';
+            return res;
           }
         },
         throw: {
@@ -134,7 +134,7 @@ module.exports = {
           path: '/fail/on/promise/reject',
           handler: function () {
             return new Promise(function (resolve, reject) {
-              reject(new Error('Expected'));
+              reject('Expected');
             });
           }
         },
@@ -147,7 +147,7 @@ module.exports = {
           path: '/foo/a',
           permissions: 'foo',
           handler: function () {
-            return { body: { foo: 'a' } }
+            return { foo: 'a' }
           }
         },
         b: {
@@ -155,7 +155,7 @@ module.exports = {
           permissions: 'root',
           method: 'PoSt',
           handler: function () {
-            return { body: { foo: 'b' } }
+            return { foo: 'b' }
           }
         },
         c: {
@@ -163,7 +163,7 @@ module.exports = {
           permissions: 'root',
           method: 'PaTcH',
           handler: function () {
-            return { body: { foo: 'b' } }
+            return { foo: 'b' }
           }
         },
       }

@@ -26,43 +26,30 @@ exports.success = function(opts) {
   //
   // determine stream and object mode
   //
-  opts.stream = !!(opts.items || opts.chunks);
-  opts.objectMode = opts.stream ? !!opts.items : util.isObjectMode(opts.body);
+  var isStream = opts.isStream = !!(opts.items || opts.chunks);
+  var objMode = opts.objMode = isStream ? !!opts.items : util.isObjectMode(opts.body);
 
   //
   // object stream response
   //
-  if (opts.objectMode) {
-    opts.headers['content-type'] = 'application/json' + (opts.stream ? ';parse' : '');
+  if (objMode) {
+    opts.headers['content-type'] = 'application/json;' + (isStream ? 'stream' : 'parse');
   }
 
   var handler = function (request) {
-    //
-    // defensively copy all the things
-    //
-    var response = xtend(res);
+    if (objMode) {
+      if (isStream) {
+        return spigot({ objectMode: true }, opts.items.slice());
+      }
 
-    if (response.headers) {
-      response.headers = xtend(response.headers);
+      return JSON.parse(JSON.stringify(opts.body));
     }
 
-    if (opts.objectMode) {
-      if (opts.stream) {
-        response.body = spigot({ objectMode: true }, opts.items.slice());
-      }
-      else {
-        response.body = JSON.parse(JSON.stringify(opts.body));
-      }
-    }
-    else {
-      if (opts.stream) {
-        response.body = spigot(opts.chunks.slice());
-      }
-      else {
-        // TODO: copy buffer instance
-        response.body = opts.body;
-      }
-    }
+    var response = {};
+    response[request.endo.COMPLETE_RESPONSE] = true;
+    response.status = 200;
+    response.headers = {};
+    response.body = spigot(opts.chunks.slice());
 
     return response;
   };
@@ -84,16 +71,16 @@ exports.verifyResponse = function (opts, response) {
     // verify we got the right kind of body
     //
     var body = response.body;
-    var stream = util.isStream(body);
-    assert.equal(opts.stream, stream, 'Incorrect response stream type');
+    var isStream = util.isStream(body);
+    assert.equal(opts.isStream, isStream, 'Incorrect response stream type');
 
     var objMode = util.isObjectMode(body);
-    assert.equal(opts.objectMode, objMode, 'Incorrect object mode');
+    assert.equal(opts.objMode, objMode, 'Incorrect object mode');
 
     //
     // validate stream response body
     //
-    if (stream) {
+    if (isStream) {
       return new Promise(function (resolve, reject) {
 
         //
@@ -125,7 +112,7 @@ exports.verifyResponse = function (opts, response) {
           var expected = opts.items;
 
           if (objMode) {
-            assert.deepEqual(result, expected, 'Invalid objectMode stream');
+            assert.deepEqual(result, expected, 'Invalid object mode stream');
           }
           else if (encoding === 'string') {
             expected = String.prototype.concat.apply('', opts.chunks);

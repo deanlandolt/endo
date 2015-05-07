@@ -19,6 +19,13 @@ Response values for JSON serialization may optionally be returned as promises. A
 All endpoints can be exposed over HTTP, WebSockets with line-separated JSON, or both. Interaction over WebSockets is symmetrical with HTTP, and handlers should be transport-agnostic. The same handler logic is invoked in the same way regardless of the underlying protocol.
 
 
+## Error handling
+
+Outputs errors to `stderr` unless NODE_ENV is set to `test`. If a response head not been written, an appropriate HTTP error will be written -- with a `500` status cdoe unless the error contains a `status` property.
+
+An `error` event will be raised on the application instance for all errors.
+
+
 ## Subscriptions
 
 

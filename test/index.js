@@ -1,7 +1,13 @@
+var Promise = require('bluebird');
+Promise.longStackTraces();
+
+
+var coro = require('copromise');
+coro.Promise = Promise;
+
 require('./auth');
 
 var assert = require('assert');
-var coro = require('copromise');
 var auth = require('../auth');
 var endo = require('../');
 var API_FIXTURE = require('./fixtures/api');
@@ -53,13 +59,12 @@ coro.run(function* () {
   });
 
   for (var i in contexts) {
-    result = yield api.request(contexts[i]);
+    response = yield api.request(contexts[i]);
 
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.headers, { 'content-type': 'application/json' });
-    assert.deepEqual(result.body, { foo: 'a' });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.headers, { 'content-type': 'application/json;parse' });
+    assert.deepEqual(response.body, { foo: 'a' });
   }
-
 
   //
   // body tests
@@ -68,7 +73,7 @@ coro.run(function* () {
   endpoints = API_FIXTURE.sections.bodyTests.endpoints;
   for (name in endpoints) {
     endpoint = endpoints[name];
-    console.log(endpoint.path);
+    console.warn(endpoint.path);
 
     result = yield api.request({ endpointPath: endpoint.path });
     yield endpoint.handler.verify(result);
@@ -80,7 +85,7 @@ coro.run(function* () {
   endpoints = API_FIXTURE.sections.exceptionTests.endpoints;
   for (name in endpoints) {
     endpoint = endpoints[name];
-    console.log(endpoint.path);
+    console.warn(endpoint.path);
 
     try {
       result = yield api.request({ endpointPath: endpoint.path });

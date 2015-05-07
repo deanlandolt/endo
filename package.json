@@ -30,6 +30,7 @@
   "homepage": "https://github.com/deanlandolt/endo",
   "dependencies": {
     "JSONStream": "^0.10.0",
+    "bluebird": "^2.9.25",
     "header-stream": "^0.1.4",
     "jsonwebtoken": "^5.0.0",
     "lodash": "^3.7.0",
