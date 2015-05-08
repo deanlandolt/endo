@@ -1,7 +1,8 @@
-var EventEmitter = require('events').EventEmitter;
 var assert = require('assert');
+var concat = require('concat-stream');
+var EventEmitter = require('events').EventEmitter;
 var inherits = require('util').inherits;
-var JSONStream = require('JSONStream');
+var jsonstream2 = require('jsonstream2');
 var multiplex = require('multiplex');
 var now = require('performance-now');
 var Promise = require('bluebird');
@@ -46,22 +47,6 @@ Endo.prototype.test = function (request, response) {
   return range && util.validRange(range);
 };
 
-//
-// default request handler
-//
-Endo.prototype.handle = function (request, response) {
-  //
-  // invoke endpoint handler with request context
-  //
-  var app = this;
-  return this.processRequest(request)
-    .then(app.handleResponse.bind(app, response))
-    .catch(app.handleResponseError.bind(app, response))
-    .catch(function (error) {
-      app.emit('error', error);
-    });
-};
-
 Endo.prototype.request = function (request) {
   //
   // allow string url argument form
@@ -71,6 +56,24 @@ Endo.prototype.request = function (request) {
   }
 
   return this.processRequest(request);
+};
+
+//
+// default request handler
+//
+Endo.prototype.handle = function (request, response) {
+  var app = this;
+
+  //
+  // invoke endpoint handler with request context
+  //
+  return this.processRequest(request)
+    .then(this.handleResponse.bind(this, response))
+    .catch(app.handleResponseError.bind(app, response))
+    .catch(function (error) {
+      app.emit('error', error);
+    });
+    // TODO: allow endpoints to specify a timeout -> 408 Request Timeout error?
 };
 
 //
@@ -104,8 +107,11 @@ Endo.prototype.processRequest = function (context) {
     //
     // ensure endpoint has a valid handler
     //
-    var NYI_MESSAGE = 'Endpoint not implemented: ' + endpoint.path;
-    assert.equal(typeof endpoint.handler, 'function', NYI_MESSAGE);
+    if (typeof endpoint.handler !== 'function') {
+      var error = new Error('Method Not Allowed');
+      error.status = 405;
+      throw error;
+    }
 
     //
     // check authorization
@@ -172,6 +178,7 @@ Endo.prototype.processRequest = function (context) {
   //
   return Promise.resolve(context)
     .then(app.parseRequest.bind(app))
+    .then(app.parseRequestBody.bind(app))
     .then(preprocess)
     .then(process)
     .then(postprocess)
@@ -206,6 +213,40 @@ Endo.prototype.parseRequest = function (request) {
   return request;
 };
 
+function _parseRequestJSON(stream) {
+  //
+  // collect request body stream as JSON value
+  //
+  var dfd = Promise.pending();
+
+  stream.on('error', dfd.reject);
+
+  stream.pipe(through2()).pipe(concat({ encoding: 'string' }, function (value) {
+    try {
+      dfd.resolve(value.trim() ? JSON.parse(value) : undefined);
+    }
+    catch (error) {
+      dfd.reject(error);
+    }
+  }));
+
+  return dfd.promise;
+}
+
+Endo.prototype.parseRequestBody = function (request) {
+  //
+  // body may be provided explicitly
+  //
+  if (request.body !== undefined || !util.isStream(request)) {
+    return Promise.resolve(request);
+  }
+
+  return _parseRequestJSON(request).then(function (value) {
+    request.body = value;
+    return request;
+  });
+};
+
 //
 // default response processing
 //
@@ -227,10 +268,10 @@ Endo.prototype.handleResponse = function (stream, response) {
   //
   if (util.isStream(body)) {
     //
-    // run object mode streams through JSONStream
+    // run object mode streams through jsonstream2
     //
     if (util.isObjectMode(body)) {
-      body = body.pipe(JSONStream.stringify());
+      body = body.pipe(jsonstream2.stringify());
     }
     body.pipe(stream);
   }
@@ -326,33 +367,48 @@ Endo.prototype.createStream = function (options) {
   options || (options = {});
   var app = this;
 
-  function onRequest(dup, meta) {
+  function onrequest(dup, id) {
 
     function cleanup(error) {
       dup.destroy(error);
     }
 
-    var context, resMeta
-    try {
-      context = JSON.parse(meta);
-    }
-    catch (error) {
-      return cleanup(error);
-    }
+    var meta, context, resMeta;
 
-    var req = through2()
-    .on('error', cleanup)
-    .once('data', function (chunk) {
+    function onmeta() {
+      var meta = this.read();
+      if (meta === null) {
+        return this.once('readable', onmeta);
+      }
+
+      try {
+        context = JSON.parse(meta.toString());
+      }
+      catch (error) {
+        return cleanup(error);
+      }
+
+      //
+      // pass along the rest of the stream as request body if not provided
+      //
+      if (context.body === undefined) {
+        context.body = this.pipe(through2());
+      }
+
       //
       // run through standard endpoint request handling logic
       //
       app.processRequest(context)
         .then(app.handleResponse.bind(app, res))
         .catch(cleanup)
-    })
-    .on('data', function (chunk) {
-      // TODO cullect up rest of req body and pass it along as stream
-    });
+        .catch(function (error) {
+          app.emit('error', error);
+        });
+    }
+
+    var req = through2()
+    .on('error', cleanup)
+    .once('readable', onmeta)
 
     var res = through2(function (chunk, enc, cb) {
       if (resMeta) {
@@ -367,26 +423,26 @@ Endo.prototype.createStream = function (options) {
     //
     // support writeHead method to allow us to reuse http response processing
     //
-    res.writeHead = function writeHead(status, headers) {
-      console.warn('writing head', status, headers)
+    res.writeHead = function (status, headers) {
       if (resMeta === false) {
-        console.warn('Metadata already written', resMeta.id, status, headers);
+        console.warn('Metadata already written', id, status, headers);
       }
 
       resMeta = JSON.stringify({
-        id: context.id,
+        id: id,
         status: status,
         headers: headers
       });
     };
 
-    res.pipe(dup).pipe(req)
+    res.pipe(dup).pipe(req);
 
   }
 
-  return multiplex({ error: true }, onRequest)
+  return multiplex({ error: true }, onrequest)
   .on('error', function (error) {
-    this.destroy(error);
+    console.warn('source error', error.stack)
+    // this.destroy(error);
   });
 };
 
