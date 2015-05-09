@@ -96,6 +96,18 @@ util.getEndpoint = function (endpoints, context) {
   var method = (context.method || 'GET').toUpperCase();
 
   //
+  // return default discovery/index endpoint
+  //
+  if (path === '/') {
+    // TODO: filter results by range, if provided, or other visibility filters
+    return {
+      handler: function () {
+        return endpoints;
+      }
+    }
+  }
+
+  //
   // iterate over available routes for all versions (naturally descending)
   //
   for (var version in endpoints) {

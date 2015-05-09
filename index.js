@@ -104,6 +104,7 @@ Endo.prototype.processRequest = function (context) {
     // look up endpoint baesd on request context
     //
     var endpoint = util.getEndpoint(app.endpoints, request);
+
     //
     // ensure endpoint has a valid handler
     //
@@ -114,14 +115,13 @@ Endo.prototype.processRequest = function (context) {
     }
 
     //
-    // check authorization
+    // check authorization (authentication scheme must add user key to request)
     //
     app.authorize(endpoint, request.user);
 
     //
     // invoke endpoint and force a promise to dezalgo
     //
-
     app.emit('request', request);
     return Promise.resolve(endpoint.handler(request));
   }
@@ -198,7 +198,7 @@ Endo.prototype.parseRequest = function (request) {
   //
   // parse url into path components, slicing off the first (empty) element
   //
-  var components = url.parse(request.url).pathname.split('/').slice(1);
+  var components = url.parse(request.url || '/').pathname.split('/').slice(1);
 
   //
   // shift off first element for version range, so specifiers like `^` work
@@ -323,7 +323,7 @@ Endo.prototype.responseHeaders = { server: 'Endo/' + metadata.version };
 //
 Endo.prototype.authorize = function (endpoint, user) {
   //
-  // bypass is user is undefined (implies no authentication scheme)
+  // bypass if user is undefined (implies no authentication scheme)
   //
   if (user === undefined) {
     return;
@@ -439,11 +439,12 @@ Endo.prototype.createStream = function (options) {
 
   }
 
-  return multiplex({ error: true }, onrequest)
-  .on('error', function (error) {
-    console.warn('source error', error.stack)
-    // this.destroy(error);
-  });
+  var client = multiplex({ error: true }, onrequest);
+
+  // client.on('error', client.destroy);
+  client.on('error', console.error);
+
+  return client;
 };
 
 
