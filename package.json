@@ -30,6 +30,7 @@
   "homepage": "https://github.com/deanlandolt/endo",
   "dependencies": {
     "bluebird": "^2.9.25",
+    "concat-stream": "^1.4.8",
     "header-stream": "^0.1.4",
     "jsonstream2": "^1.1.0",
     "jsonwebtoken": "^5.0.0",
@@ -43,7 +44,6 @@
     "xtend": "^4.0.0"
   },
   "devDependencies": {
-    "concat-stream": "^1.4.8",
     "copromise": "https://github.com/deanlandolt/copromise/tarball/master",
     "jshint": "2.7.0",
     "stream-spigot": "^3.0.5"
